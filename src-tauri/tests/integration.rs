@@ -50,17 +50,14 @@ fn end_to_end_load_dracula_via_adapter() {
     assert_eq!(doc.meta.format, DocumentFormat::Epub);
 
     // Chapters + blocks
-    // 32 từ NavPoint tree + 1 "Front matter" cho 2 spine item (cover, title)
-    // đứng trước navpoint đầu tiên
-    assert_eq!(
-        doc.chapters.len(),
-        33,
-        "Dracula has 32 NavPoint chapters + Front matter"
-    );
-    assert_eq!(doc.chapters[0].title, "Front matter");
+    // 32 từ NavPoint tree; cover/title page chỉ có <head><title> → không có text
+    // → không sinh "Front matter".
+    assert_eq!(doc.chapters.len(), 32, "Dracula has 32 NavPoint chapters");
+    assert_eq!(doc.chapters[0].title, "D R A C U L A");
+    // Mỗi đoạn văn là một block → hàng nghìn block, không phải 32
     assert!(
-        doc.blocks.len() >= 30,
-        "Dracula should have ≥ 30 blocks (got {})",
+        doc.blocks.len() > 1000,
+        "Dracula should have > 1000 paragraph blocks (got {})",
         doc.blocks.len()
     );
 
@@ -121,8 +118,15 @@ fn epub_keeps_spine_items_outside_toc_without_duplicates() {
             "{name}: expected >= {min_blocks} blocks (one per non-empty spine item), got {}",
             doc.blocks.len()
         );
-        let unique: HashSet<&str> = doc.blocks.iter().map(|b| b.text.as_str()).collect();
-        assert_eq!(unique.len(), doc.blocks.len(), "{name}: duplicated block text");
+        // Block giờ là đoạn văn; đoạn ngắn ("Exercises", số trang) lặp là hợp lệ,
+        // nhưng đoạn dài lặp = resource bị nạp hai lần.
+        let long: Vec<&str> = doc.blocks.iter().map(|b| b.text.as_str()).filter(|t| t.len() > 200).collect();
+        let unique: HashSet<&str> = long.iter().copied().collect();
+        assert_eq!(unique.len(), long.len(), "{name}: duplicated long block text");
+        assert!(
+            !doc.blocks.iter().any(|b| b.text.contains("<?xml")),
+            "{name}: xml prolog leaked into text"
+        );
         // mọi block phải thuộc một chapter có thật, positions liên tục
         let ids: HashSet<_> = doc.chapters.iter().map(|c| c.id).collect();
         assert!(doc.blocks.iter().all(|b| ids.contains(&b.chapter_id)), "{name}: orphan block");
