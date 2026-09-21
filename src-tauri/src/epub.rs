@@ -46,10 +46,17 @@ fn strip_html(html: &str) -> String {
 
         if ch == '<' {
             let next = rest[1..].chars().next();
-            let is_tag = matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!');
+            let is_tag = matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!' || c == '?');
             if !is_tag {
                 out.push('<');
                 i += 1;
+                continue;
+            }
+            if rest.starts_with("<?") {
+                i = match rest.find("?>") {
+                    Some(e) => i + e + 2,
+                    None => html.len(),
+                };
                 continue;
             }
             if rest.starts_with("<!--") {
@@ -59,9 +66,15 @@ fn strip_html(html: &str) -> String {
                 };
                 continue;
             }
-            if let Some((_, close)) = [("<script", "</script>"), ("<style", "</style>")]
+            if let Some((_, close)) = [("<script", "</script>"), ("<style", "</style>"), ("<head", "</head>")]
                 .iter()
-                .find(|(open, _)| lower[i..].starts_with(open))
+                .find(|(open, _)| {
+                    lower[i..].starts_with(open)
+                        && lower[i + open.len()..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c == '>' || c.is_whitespace())
+                })
             {
                 i = match lower[i..].find(close) {
                     Some(e) => i + e + close.len(),
@@ -222,14 +235,18 @@ impl DocumentAdapter for EpubAdapter {
                     id
                 }
             };
+            // Mỗi dòng (strip_html chèn '\n' tại <p>/<h*>/<li>…) là một block riêng
+            // để reader hiển thị đúng đoạn và offset highlight ngắn, ổn định.
             let idx = block_index.entry(chapter_id).or_insert(0);
-            blocks.push(Block {
-                id: BlockId::new(),
-                chapter_id,
-                text,
-                index_in_chapter: *idx,
-            });
-            *idx += 1;
+            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                blocks.push(Block {
+                    id: BlockId::new(),
+                    chapter_id,
+                    text: line.to_string(),
+                    index_in_chapter: *idx,
+                });
+                *idx += 1;
+            }
         }
         // "Front matter" được push sau TOC nhưng phải đứng đầu
         if let Some(fm) = chapters.iter().position(|c| c.title == "Front matter" && c.parent_id.is_none()) {
