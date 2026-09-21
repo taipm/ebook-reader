@@ -19,6 +19,7 @@
     onHighlight,
     onNote,
     onCancelSelection,
+    onUpdateNote,
   }: {
     doc: OpenDocumentResponse | null;
     currentChapter: Chapter | null;
@@ -30,6 +31,7 @@
     onHighlight: () => void;
     onNote: () => void;
     onCancelSelection: () => void;
+    onUpdateNote: (id: string, note: string) => void;
   } = $props();
 
   /** Container `position: relative` — toolbar được neo vào đây nên cuộn theo nội dung. */
@@ -106,6 +108,10 @@
   }
 
   function onKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape" && editing) {
+      closeGloss();
+      return;
+    }
     if (e.key === "Escape" && pendingSelection) {
       window.getSelection()?.removeAllRanges();
       onCancelSelection();
@@ -162,20 +168,65 @@
     return out;
   }
 
-  function handleHighlightClick(annotationId: string) {
-    highlightedAnnotationId = annotationId;
-    setTimeout(() => (highlightedAnnotationId = null), 1500);
+  // ── Inline gloss editor (ghi nghĩa nhanh ngay tại highlight) ─────────
+  const GLOSS_MAX = 40;
+  function glossOf(note: string): string {
+    return note.length > GLOSS_MAX ? note.slice(0, GLOSS_MAX) + "…" : note;
   }
+
+  let editing = $state<{ id: string; x: number; y: number } | null>(null);
+  let draft = $state("");
+
+  function handleHighlightClick(annotationId: string, el: HTMLElement) {
+    if (!bodyEl) return;
+    // Kéo chọn chữ kết thúc trên highlight cũng bắn click → không mở editor.
+    if (!window.getSelection()?.isCollapsed) return;
+    const r = el.getBoundingClientRect();
+    const body = bodyEl.getBoundingClientRect();
+    draft = annotations.find((a) => a.id === annotationId)?.note ?? "";
+    editing = { id: annotationId, x: r.left + r.width / 2 - body.left, y: r.bottom - body.top + 6 };
+    highlightedAnnotationId = annotationId;
+  }
+
+  function commitGloss() {
+    if (!editing) return;
+    onUpdateNote(editing.id, draft.trim());
+    closeGloss();
+  }
+
+  function closeGloss() {
+    editing = null;
+    draft = "";
+    highlightedAnnotationId = null;
+  }
+
+  function onGlossKey(e: KeyboardEvent) {
+    if (e.key === "Enter") commitGloss();
+    else if (e.key === "Escape") closeGloss();
+  }
+
+  /** Click ngoài editor (và không phải lên highlight vừa mở) → huỷ. */
+  function onDocClick(e: MouseEvent) {
+    if (!editing) return;
+    const t = e.target as HTMLElement | null;
+    if (t?.closest(".gloss-editor") || t?.closest(".hl")) return;
+    closeGloss();
+  }
+
+  const autofocus = (el: HTMLInputElement) => {
+    el.focus();
+    el.select();
+  };
 
   function onHighlightKey(e: KeyboardEvent, annotationId: string) {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      handleHighlightClick(annotationId);
+      handleHighlightClick(annotationId, e.currentTarget as HTMLElement);
     }
   }
 </script>
 
-<svelte:document onselectionchange={onSelectionChange} onmouseup={handleMouseUp} />
+<svelte:document onselectionchange={onSelectionChange} onmouseup={handleMouseUp} onclick={onDocClick} />
 <svelte:window onkeydown={onKeyDown} />
 
 {#if status === "opening"}
@@ -208,9 +259,11 @@
                 class:flash={seg.id === highlightedAnnotationId}
                 style="background: var(--hl-{seg.color})"
                 data-annotation-id={seg.id}
+                data-note={seg.note ? glossOf(seg.note) : undefined}
+                title={seg.note || undefined}
                 role="button"
                 tabindex="0"
-                onclick={() => seg.id && handleHighlightClick(seg.id)}
+                onclick={(e) => seg.id && handleHighlightClick(seg.id, e.currentTarget)}
                 onkeydown={(e) => seg.id && onHighlightKey(e, seg.id)}
               >{seg.content}</span>
             {:else}
@@ -220,6 +273,18 @@
         </p>
       {/each}
     </div>
+
+    {#if editing}
+      <div class="gloss-editor" style="left: {editing.x}px; top: {editing.y}px">
+        <input
+          type="text"
+          placeholder="Nghĩa / ghi chú…"
+          bind:value={draft}
+          onkeydown={onGlossKey}
+          use:autofocus
+        />
+      </div>
+    {/if}
 
     {#if pendingSelection}
       <SelectionToolbar
@@ -279,6 +344,37 @@
     text-decoration-thickness: 2px;
     text-underline-offset: 0.2em;
   }
+  /* Gloss qua ::after: không sinh text node → computeCharOffset/selection không bị lệch */
+  .hl.note-hl::after {
+    content: " ⟨" attr(data-note) "⟩";
+    font-family: var(--font-ui);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    background: var(--bg-reader);
+    padding-inline: 0.15em;
+  }
+  .gloss-editor {
+    position: absolute;
+    transform: translateX(-50%);
+    z-index: 100;
+    padding: var(--space-1);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+  }
+  .gloss-editor input {
+    width: 16rem;
+    max-width: 70vw;
+    font: inherit;
+    font-family: var(--font-ui);
+    font-size: var(--text-sm);
+    color: var(--fg);
+    background: transparent;
+    border: 0;
+    padding: var(--space-1) var(--space-2);
+    outline: none;
+  }
   .hl.flash {
     outline: 2px solid var(--accent);
     outline-offset: 2px;
@@ -287,7 +383,38 @@
     .hl {
       transition: box-shadow var(--ease);
     }
-    .hl.flash {
+    /* Gloss qua ::after: không sinh text node → computeCharOffset/selection không bị lệch */
+  .hl.note-hl::after {
+    content: " ⟨" attr(data-note) "⟩";
+    font-family: var(--font-ui);
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+    background: var(--bg-reader);
+    padding-inline: 0.15em;
+  }
+  .gloss-editor {
+    position: absolute;
+    transform: translateX(-50%);
+    z-index: 100;
+    padding: var(--space-1);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-md);
+  }
+  .gloss-editor input {
+    width: 16rem;
+    max-width: 70vw;
+    font: inherit;
+    font-family: var(--font-ui);
+    font-size: var(--text-sm);
+    color: var(--fg);
+    background: transparent;
+    border: 0;
+    padding: var(--space-1) var(--space-2);
+    outline: none;
+  }
+  .hl.flash {
       animation: pulse 0.6s 2;
     }
     @keyframes pulse {

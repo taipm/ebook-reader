@@ -239,6 +239,13 @@
     noteDraft = "";
   }
 
+  /** Sửa note tại chỗ từ Reader (gloss); note rỗng → giữ highlight, note = "". */
+  function updateNote(id: string, note: string) {
+    annotations = annotations.map((a) =>
+      a.id === id ? { ...a, note, updated_at: new Date().toISOString() } : a
+    );
+  }
+
   function deleteAnnotation(id: string) {
     annotations = annotations.filter((a) => a.id !== id);
     if (editingAnnotationId === id) {
@@ -450,6 +457,7 @@
         onHighlight={addHighlight}
         onNote={addNoteFromSelection}
         onCancelSelection={() => (pendingSelection = null)}
+        onUpdateNote={updateNote}
       />
       {#if doc && currentChapter && (prevChapter || nextChapter)}
         <nav class="chapter-nav" aria-label="Chapter navigation">
