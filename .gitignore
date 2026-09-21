@@ -27,3 +27,6 @@ node_modules/
 # Tauri icons (generated placeholder, will commit real ones)
 /src-tauri/icons/*.png
 !/src-tauri/icons/icon.png
+
+# Claude Code local state
+.claude/
