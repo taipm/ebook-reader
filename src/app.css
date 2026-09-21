@@ -1,0 +1,182 @@
+/* ebook-reader design tokens — see docs/DESIGN.md for names + usage.
+   Light is the default; dark follows prefers-color-scheme. Components read
+   tokens only; never hardcode a hex. */
+
+:root {
+  color-scheme: light dark;
+
+  /* ── Surfaces ─────────────────────────────────────────────── */
+  --bg: #f6f5f1;            /* app background, "paper" */
+  --bg-reader: #fbfaf7;     /* reading column, one step lighter than app */
+  --bg-panel: #eeece6;      /* sidebars: TOC, notes */
+  --bg-raised: #ffffff;     /* popovers, menus, dialogs */
+  --bg-hover: rgba(30, 37, 48, 0.06);
+  --bg-active: rgba(30, 37, 48, 0.1);
+  --border: rgba(30, 37, 48, 0.14);
+  --border-strong: rgba(30, 37, 48, 0.3);
+
+  /* ── Ink ──────────────────────────────────────────────────── */
+  --fg: #1e2530;            /* body text */
+  --fg-muted: #5a6270;      /* secondary labels, metadata */
+  --fg-faint: #8c93a0;      /* placeholders, disabled */
+  --fg-on-accent: #ffffff;
+
+  /* ── Accent (verdigris) ───────────────────────────────────── */
+  --accent: #2e6f6a;
+  --accent-hover: #255d59;
+  --accent-soft: rgba(46, 111, 106, 0.12);   /* tinted background */
+  --accent-ring: rgba(46, 111, 106, 0.45);   /* focus ring */
+  --danger: #b4443c;
+  --danger-soft: rgba(180, 68, 60, 0.12);
+
+  /* ── Highlight markers (background behind selected text) ──── */
+  --hl-yellow: #f6e27a;
+  --hl-green: #bfe3b4;
+  --hl-blue: #bcd8f5;
+  --hl-rose: #f5c6cf;
+  --hl-yellow-fg: #6b5400;  /* text colour for a chip/badge of that marker */
+  --hl-green-fg: #2f5d2a;
+  --hl-blue-fg: #2b4f78;
+  --hl-rose-fg: #7a3242;
+  --note-bg: #fdf6dc;       /* note card */
+  --note-border: #e3d59a;
+  --selection: rgba(46, 111, 106, 0.25);
+
+  /* ── Type ─────────────────────────────────────────────────── */
+  --font-reading: "Iowan Old Style", "Charter", "Palatino", "Palatino Linotype",
+    "Book Antiqua", Georgia, "Noto Serif", serif;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+    "Noto Sans", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* UI scale (Bringhurst-ish, ratio ≈ 1.2) */
+  --text-xs: 0.75rem;   /* 12 */
+  --text-sm: 0.875rem;  /* 14 */
+  --text-md: 1rem;      /* 16 */
+  --text-lg: 1.25rem;   /* 20 */
+  --text-xl: 1.5rem;    /* 24 */
+  --text-2xl: 2rem;     /* 32 */
+
+  /* Reading column */
+  --reading-size: 1.1875rem;  /* 19px; user-adjustable later via this var */
+  --reading-leading: 1.65;
+  --reading-measure: 64ch;    /* max line length */
+  --reading-para-gap: 1em;
+
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* ── Spacing (4px base) ───────────────────────────────────── */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-8: 3rem;
+
+  /* ── Radius / shadow / motion ─────────────────────────────── */
+  --radius-sm: 4px;   /* chips, badges, inputs */
+  --radius-md: 8px;   /* buttons, cards */
+  --radius-lg: 12px;  /* popovers, dialogs */
+  --shadow-sm: 0 1px 2px rgba(20, 24, 32, 0.08);
+  --shadow-md: 0 4px 12px rgba(20, 24, 32, 0.12), 0 1px 3px rgba(20, 24, 32, 0.08);
+  --shadow-lg: 0 16px 40px rgba(20, 24, 32, 0.18), 0 2px 6px rgba(20, 24, 32, 0.1);
+  --ease: 160ms cubic-bezier(0.2, 0, 0, 1);
+
+  /* ── Layout ───────────────────────────────────────────────── */
+  --header-h: 44px;
+  --panel-w: 260px;
+  --panel-w-min: 180px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171c24;
+    --bg-reader: #1c222b;
+    --bg-panel: #131820;
+    --bg-raised: #222933;
+    --bg-hover: rgba(217, 220, 225, 0.07);
+    --bg-active: rgba(217, 220, 225, 0.12);
+    --border: rgba(217, 220, 225, 0.12);
+    --border-strong: rgba(217, 220, 225, 0.28);
+
+    --fg: #d9dce1;
+    --fg-muted: #9aa1ac;
+    --fg-faint: #6b727d;
+    --fg-on-accent: #0f1a19;
+
+    --accent: #6fbfb8;
+    --accent-hover: #8ccfc9;
+    --accent-soft: rgba(111, 191, 184, 0.14);
+    --accent-ring: rgba(111, 191, 184, 0.5);
+    --danger: #e07a72;
+    --danger-soft: rgba(224, 122, 114, 0.14);
+
+    /* markers dim so dark text stays readable on them; fg pairs go light */
+    --hl-yellow: rgba(246, 226, 122, 0.32);
+    --hl-green: rgba(191, 227, 180, 0.3);
+    --hl-blue: rgba(188, 216, 245, 0.3);
+    --hl-rose: rgba(245, 198, 207, 0.3);
+    --hl-yellow-fg: #f0dc85;
+    --hl-green-fg: #b6dcaa;
+    --hl-blue-fg: #b3d1f2;
+    --hl-rose-fg: #f0bcc6;
+    --note-bg: #262a22;
+    --note-border: #4a4a2e;
+    --selection: rgba(111, 191, 184, 0.3);
+
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.45), 0 1px 3px rgba(0, 0, 0, 0.35);
+    --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.4);
+  }
+}
+
+/* ── Base ───────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-ring);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -1,313 +1,671 @@
 <script lang="ts">
   import { open } from "@tauri-apps/plugin-dialog";
   import { invoke } from "@tauri-apps/api/core";
+  import type {
+    Chapter,
+    Block,
+    Annotation,
+    OpenDocumentResponse,
+    PendingSelection,
+    FocusMode,
+    BundledBook,
+  } from "$lib/types";
+  import AppHeader from "$lib/components/AppHeader.svelte";
+  import TocPanel from "$lib/components/TocPanel.svelte";
+  import Reader from "$lib/components/Reader.svelte";
+  import NotesPanel from "$lib/components/NotesPanel.svelte";
+  import { SHORTCUTS } from "$lib/stores/shortcuts";
+  import { slide } from "svelte/transition";
+  import { onMount, tick } from "svelte";
 
-  // Response shape từ Rust `open_document` command
-  type Chapter = {
-    id: string;
-    parent_id: string | null;
-    title: string;
-    level: number;
-    position: number;
-  };
+  // ── App state ────────────────────────────────────────────────────────
+  let doc = $state<OpenDocumentResponse | null>(null);
+  let currentChapter = $state<Chapter | null>(null);
+  let currentBlocks = $state<Block[]>([]);
+  let annotations = $state<Annotation[]>([]);
+  let status = $state<"idle" | "opening" | "ready" | "error">("idle");
+  let errorMsg = $state(""); // technical detail, shown under <details>
+  let errorTitle = $state(""); // what happened, in the user's words
+  let currentPath = $state<string | null>(null);
+  let failedPath = $state<string | null>(null); // for Retry in the banner
 
-  type OpenDocumentResponse = {
-    meta: {
-      id: string;
-      title: string;
-      author: string | null;
-      format: string;
-      content_hash: string;
-      created_at: string;
-      updated_at: string;
-    };
-    chapters: Chapter[];
-    block_count: number;
-    total_chars: number;
-  };
+  const reducedMotion =
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  const colSlide = { axis: "x" as const, duration: reducedMotion ? 0 : 160 };
 
-  let status: "idle" | "opening" | "ready" | "error" = $state("idle");
-  let errorMsg = $state("");
-  let doc: OpenDocumentResponse | null = $state(null);
+  function basename(path: string): string {
+    return path.split(/[\\/]/).pop() || path;
+  }
 
+  // UI state
+  let focusMode = $state<FocusMode>("normal");
+  let lastMode = $state<FocusMode>("normal"); // for ⌘0 toggle reader ↔ last
+  let columnWidths = $state({ contents: 20, notes: 20 });
+  let pendingSelection = $state<PendingSelection | null>(null);
+  let noteDraft = $state("");
+  let editingAnnotationId = $state<string | null>(null);
+  let highlightedAnnotationId = $state<string | null>(null);
+
+  // Library state
+  let library = $state<BundledBook[]>([]);
+  let libraryOpen = $state(false);
+  let libraryLoading = $state(false);
+
+  // Load library once on mount (not an $effect: an empty/failed result would
+  // flip libraryLoading and re-trigger it forever).
+  function refreshLibrary() {
+    if (libraryLoading) return;
+    libraryLoading = true;
+    invoke<BundledBook[]>("list_bundled_books")
+      .then((books) => {
+        library = books;
+      })
+      .catch((e) => {
+        console.error("Failed to load library:", e);
+      })
+      .finally(() => {
+        libraryLoading = false;
+      });
+  }
+  onMount(refreshLibrary);
+
+  // Click outside to close popover
+  function handleWindowClick(event: MouseEvent) {
+    if (!libraryOpen) return;
+    const target = event.target as HTMLElement;
+    if (!target.closest(".library-popover") && !target.closest(".library-trigger")) {
+      libraryOpen = false;
+    }
+  }
+
+  // ── File open ────────────────────────────────────────────────────────
   async function handleOpen() {
     status = "opening";
     errorMsg = "";
     try {
-      // Step 1: mở native file dialog
       const selected = await open({
         multiple: false,
         filters: [
-          {
-            name: "ebook / markdown",
-            extensions: ["epub", "md", "markdown"],
-          },
+          { name: "ebook / markdown", extensions: ["epub", "md", "markdown"] },
         ],
       });
       if (!selected) {
-        status = "idle";
+        status = doc ? "ready" : "idle";
         return;
       }
-      const path = selected as string;
-
-      // Step 2: gọi Rust command
-      const result = await invoke<OpenDocumentResponse>("open_document", { path });
-      doc = result;
-      status = "ready";
+      await openPath(selected as string);
     } catch (e) {
-      status = "error";
-      errorMsg = String(e);
+      fail("Couldn't open the file picker", e);
     }
   }
 
-  function formatHash(s: string): string {
-    return s.length > 12 ? `${s.slice(0, 8)}…${s.slice(-4)}` : s;
+  async function openPath(path: string) {
+    status = "opening";
+    errorMsg = "";
+    try {
+      const result = await invoke<OpenDocumentResponse>("open_document", { path });
+      doc = result;
+      currentPath = path;
+      failedPath = null;
+      status = "ready";
+      annotations = [];
+      const first = result.chapters[0];
+      if (first) await selectChapter(first);
+    } catch (e) {
+      failedPath = path;
+      fail(`Couldn't open "${basename(path)}"`, e);
+    }
   }
 
-  function formatChars(n: number): string {
-    if (n < 1000) return `${n}`;
-    if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
-    return `${(n / 1_000_000).toFixed(1)}M`;
+  function fail(title: string, e: unknown) {
+    status = "error";
+    errorTitle = title;
+    errorMsg = String(e);
+  }
+
+  async function selectChapter(chapter: Chapter) {
+    if (!doc) return;
+    pendingSelection = null;
+    try {
+      const blocks = await invoke<Block[]>("get_chapter_blocks", {
+        chapterId: chapter.id,
+      });
+      currentChapter = chapter;
+      currentBlocks = blocks;
+    } catch (e) {
+      fail(`Couldn't load chapter "${chapter.title}"`, e);
+    }
+  }
+
+  function dismissError() {
+    status = doc ? "ready" : "idle";
+    errorMsg = "";
+    errorTitle = "";
+  }
+
+  function retryError() {
+    if (failedPath) openPath(failedPath);
+    else dismissError();
+  }
+
+  async function loadBundledBook(book: BundledBook) {
+    libraryOpen = false;
+    await openPath(book.path);
+  }
+
+  // ── Chapter prev/next ────────────────────────────────────────────────
+  const chapterIndex = $derived(
+    doc && currentChapter ? doc.chapters.findIndex((c) => c.id === currentChapter!.id) : -1
+  );
+  const prevChapter = $derived(chapterIndex > 0 ? doc!.chapters[chapterIndex - 1] : null);
+  const nextChapter = $derived(
+    doc && chapterIndex >= 0 && chapterIndex < doc.chapters.length - 1
+      ? doc.chapters[chapterIndex + 1]
+      : null
+  );
+
+  // ── Add annotation ───────────────────────────────────────────────────
+  function addHighlight() {
+    if (!pendingSelection || !doc || !currentChapter) return;
+    const ann: Annotation = {
+      id: crypto.randomUUID(),
+      document_id: doc.meta.id,
+      location: {
+        document_id: doc.meta.id,
+        chapter_id: currentChapter.id,
+        block_id: pendingSelection.block_id,
+        char_start: pendingSelection.char_start,
+        char_end: pendingSelection.char_end,
+      },
+      kind: "highlight",
+      highlighted_text: pendingSelection.text,
+      note: "",
+      tags: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      color: "yellow",
+    };
+    annotations = [...annotations, ann];
+    pendingSelection = null;
+    window.getSelection()?.removeAllRanges();
+  }
+
+  function addNoteFromSelection() {
+    if (!pendingSelection || !doc || !currentChapter) return;
+    const ann: Annotation = {
+      id: crypto.randomUUID(),
+      document_id: doc.meta.id,
+      location: {
+        document_id: doc.meta.id,
+        chapter_id: currentChapter.id,
+        block_id: pendingSelection.block_id,
+        char_start: pendingSelection.char_start,
+        char_end: pendingSelection.char_end,
+      },
+      kind: "note",
+      highlighted_text: pendingSelection.text,
+      note: "",
+      tags: [],
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+      color: "rose",
+    };
+    annotations = [...annotations, ann];
+    if (columnWidths.notes === 0) setFocusMode("normal");
+    editingAnnotationId = ann.id;
+    noteDraft = "";
+    pendingSelection = null;
+  }
+
+  function saveNote() {
+    if (!editingAnnotationId) return;
+    annotations = annotations.map((a) =>
+      a.id === editingAnnotationId
+        ? { ...a, note: noteDraft, updated_at: new Date().toISOString() }
+        : a
+    );
+    editingAnnotationId = null;
+    noteDraft = "";
+  }
+
+  function cancelNote() {
+    if (editingAnnotationId) {
+      const ann = annotations.find((a) => a.id === editingAnnotationId);
+      if (ann && !ann.note.trim()) {
+        annotations = annotations.filter((a) => a.id !== editingAnnotationId);
+      }
+    }
+    editingAnnotationId = null;
+    noteDraft = "";
+  }
+
+  function deleteAnnotation(id: string) {
+    annotations = annotations.filter((a) => a.id !== id);
+    if (editingAnnotationId === id) {
+      editingAnnotationId = null;
+      noteDraft = "";
+    }
+  }
+
+  async function scrollToAnnotation(ann: Annotation) {
+    if (currentChapter?.id !== ann.location.chapter_id) {
+      const chap = doc?.chapters.find((c) => c.id === ann.location.chapter_id);
+      if (!chap) return;
+      await selectChapter(chap);
+      await tick();
+    }
+    const el = document.querySelector(
+      `[data-block-id="${ann.location.block_id}"]`
+    ) as HTMLElement | null;
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    highlightedAnnotationId = ann.id;
+    setTimeout(() => (highlightedAnnotationId = null), 1500);
+  }
+
+  // ── Focus modes ──────────────────────────────────────────────────────
+  const widthsForMode = (mode: FocusMode) => {
+    switch (mode) {
+      case "normal":
+        return { contents: 20, notes: 20 };
+      case "reader":
+        return { contents: 0, notes: 0 };
+      case "research":
+        return { contents: 25, notes: 25 };
+      case "notes":
+        return { contents: 0, notes: 40 };
+    }
+  };
+
+  function setFocusMode(mode: FocusMode) {
+    if (focusMode !== "reader") lastMode = focusMode;
+    focusMode = mode;
+    columnWidths = widthsForMode(mode);
+  }
+
+  // ── Resize handle ────────────────────────────────────────────────────
+  type Side = "contents" | "notes";
+  let dragging = $state<Side | null>(null);
+
+  // Clamp in px so a narrow window can't squash a panel below --panel-w-min.
+  function clampPct(px: number): number {
+    const total = window.innerWidth;
+    const minPx =
+      parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--panel-w-min")) || 180;
+    const lo = Math.max(minPx, total * 0.1);
+    const hi = Math.min(480, total * 0.4);
+    return (Math.max(lo, Math.min(hi, px)) / total) * 100;
+  }
+
+  function setWidth(side: Side, px: number) {
+    columnWidths[side] = clampPct(px);
+  }
+
+  function widthPx(side: Side): number {
+    return Math.round((columnWidths[side] / 100) * window.innerWidth);
+  }
+
+  function onResizeMouseDown(side: Side, e: MouseEvent) {
+    e.preventDefault();
+    dragging = side;
+  }
+
+  function onMouseMove(e: MouseEvent) {
+    if (!dragging) return;
+    const x = e.clientX;
+    setWidth(dragging, dragging === "contents" ? x : window.innerWidth - x);
+  }
+
+  function onMouseUp() {
+    dragging = null;
+  }
+
+  function onResizeKey(side: Side, e: KeyboardEvent) {
+    const grow = side === "contents" ? "ArrowRight" : "ArrowLeft";
+    const shrink = side === "contents" ? "ArrowLeft" : "ArrowRight";
+    if (e.key !== grow && e.key !== shrink) return;
+    e.preventDefault();
+    setWidth(side, widthPx(side) + (e.key === grow ? 16 : -16));
+  }
+
+  function resetWidth(side: Side) {
+    columnWidths[side] = widthsForMode(focusMode)[side];
+  }
+
+  $effect(() => {
+    if (dragging) {
+      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("mouseup", onMouseUp);
+      return () => {
+        window.removeEventListener("mousemove", onMouseMove);
+        window.removeEventListener("mouseup", onMouseUp);
+      };
+    }
+  });
+
+  // ── Keyboard shortcuts ───────────────────────────────────────────────
+  function isTyping(e: KeyboardEvent): boolean {
+    const t = e.target as HTMLElement | null;
+    return !!t?.closest("input, textarea, select, [contenteditable]");
+  }
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape" && status === "error") {
+      dismissError();
+      return;
+    }
+    if (isTyping(e)) return;
+    if (!(e.metaKey || e.ctrlKey || e.altKey)) {
+      // [ / ] step through chapters
+      if (e.key === "[" && prevChapter) selectChapter(prevChapter);
+      else if (e.key === "]" && nextChapter) selectChapter(nextChapter);
+      return;
+    }
+    if (e.altKey && !e.metaKey && !e.ctrlKey) return;
+    if (e.key === "0") {
+      e.preventDefault();
+      setFocusMode(focusMode === "reader" ? lastMode : "reader");
+      return;
+    }
+    const mode = SHORTCUTS[e.key];
+    if (mode) {
+      e.preventDefault();
+      setFocusMode(mode);
+    }
   }
 </script>
 
-<main>
-  <header>
-    <h1>ebook-reader</h1>
-    <p class="tagline">Personal knowledge workspace</p>
-  </header>
+<svelte:window onkeydown={onKeyDown} onclick={handleWindowClick} />
 
-  <section class="actions">
-    <button onclick={handleOpen} disabled={status === "opening"}>
-      {status === "opening" ? "Opening…" : "📂 Open EPUB / Markdown"}
-    </button>
-  </section>
+<main class="app" data-mode={focusMode} class:dragging>
+  <AppHeader
+    {doc}
+    {status}
+    {focusMode}
+    {library}
+    {libraryLoading}
+    bind:libraryOpen
+    {currentPath}
+    onOpen={handleOpen}
+    onSetFocusMode={setFocusMode}
+    onLoadBook={loadBundledBook}
+  />
 
   {#if status === "error"}
-    <section class="error">
-      <strong>Error:</strong>
-      <pre>{errorMsg}</pre>
-    </section>
-  {/if}
-
-  {#if doc}
-    <section class="result">
-      <h2>{doc.meta.title}</h2>
-      {#if doc.meta.author}
-        <p class="author">by {doc.meta.author}</p>
-      {/if}
-
-      <div class="stats">
-        <div class="stat">
-          <span class="label">Format</span>
-          <span class="value">{doc.meta.format.toUpperCase()}</span>
-        </div>
-        <div class="stat">
-          <span class="label">Chapters</span>
-          <span class="value">{doc.chapters.length}</span>
-        </div>
-        <div class="stat">
-          <span class="label">Blocks</span>
-          <span class="value">{doc.block_count}</span>
-        </div>
-        <div class="stat">
-          <span class="label">Total chars</span>
-          <span class="value">{formatChars(doc.total_chars)}</span>
-        </div>
-        <div class="stat">
-          <span class="label">Hash</span>
-          <span class="value mono">{formatHash(doc.meta.content_hash)}</span>
-        </div>
-      </div>
-
-      <h3>Table of contents ({doc.chapters.length})</h3>
-      <ol class="toc">
-        {#each doc.chapters.slice(0, 50) as ch (ch.id)}
-          <li style="margin-left: {(ch.level - 1) * 16}px">
-            <span class="lvl">L{ch.level}</span>
-            <span class="title">{ch.title}</span>
-          </li>
-        {/each}
-        {#if doc.chapters.length > 50}
-          <li class="more">… and {doc.chapters.length - 50} more</li>
+    <div class="banner error" role="alert">
+      <div class="banner-text">
+        <strong>{errorTitle || "Something went wrong"}</strong>
+        {#if errorMsg}
+          <details>
+            <summary>Details</summary>
+            <pre>{errorMsg}</pre>
+          </details>
         {/if}
-      </ol>
-
-      <p class="hint">
-        🚧 MVP 1 Phase A: EPUB & Markdown loaded successfully. UI 3-column + highlight +
-        note sync coming in Phase B.
-      </p>
-    </section>
-  {:else if status === "idle"}
-    <section class="empty">
-      <p>Chọn 1 file EPUB hoặc Markdown để bắt đầu.</p>
-      <p class="hint">Test file available: <code>~/GitHub/ebook-reader/test-data/dracula.epub</code></p>
-    </section>
+      </div>
+      <div class="banner-actions">
+        {#if failedPath}
+          <button class="banner-btn" onclick={retryError}>Retry</button>
+        {/if}
+        <button class="banner-btn" onclick={dismissError} aria-label="Dismiss error">Dismiss</button>
+      </div>
+    </div>
   {/if}
+
+  <div class="three-col">
+    {#if columnWidths.contents > 0}
+      <aside class="col contents" style="width: {columnWidths.contents}%" transition:slide={colSlide}>
+        <TocPanel
+          chapters={doc?.chapters ?? []}
+          currentChapterId={currentChapter?.id ?? null}
+          annotationCount={annotations.length}
+          totalChars={doc?.total_chars ?? 0}
+          onSelect={selectChapter}
+        />
+      </aside>
+      <div
+        class="resize-handle"
+        class:active={dragging === "contents"}
+        onmousedown={(e) => onResizeMouseDown("contents", e)}
+        onkeydown={(e) => onResizeKey("contents", e)}
+        ondblclick={() => resetWidth("contents")}
+        role="slider"
+        aria-orientation="vertical"
+        aria-label="Resize contents panel"
+        aria-valuenow={widthPx("contents")}
+        aria-valuemin={180}
+        tabindex="0"
+        title="Drag or use ← → · double-click to reset"
+      ></div>
+    {/if}
+
+    <section class="col reader" style="flex: 1" aria-busy={status === "opening"}>
+      <Reader
+        {doc}
+        {currentChapter}
+        {currentBlocks}
+        {annotations}
+        {status}
+        bind:pendingSelection
+        bind:highlightedAnnotationId
+        onHighlight={addHighlight}
+        onNote={addNoteFromSelection}
+        onCancelSelection={() => (pendingSelection = null)}
+      />
+      {#if doc && currentChapter && (prevChapter || nextChapter)}
+        <nav class="chapter-nav" aria-label="Chapter navigation">
+          {#if prevChapter}
+            <button class="chapter-link prev" onclick={() => selectChapter(prevChapter!)} title="[">
+              <span class="chapter-dir">Previous</span>
+              <span class="chapter-name">{prevChapter.title}</span>
+            </button>
+          {:else}<span></span>{/if}
+          {#if nextChapter}
+            <button class="chapter-link next" onclick={() => selectChapter(nextChapter!)} title="]">
+              <span class="chapter-dir">Next</span>
+              <span class="chapter-name">{nextChapter.title}</span>
+            </button>
+          {/if}
+        </nav>
+      {/if}
+    </section>
+
+    {#if columnWidths.notes > 0}
+      <div
+        class="resize-handle"
+        class:active={dragging === "notes"}
+        onmousedown={(e) => onResizeMouseDown("notes", e)}
+        onkeydown={(e) => onResizeKey("notes", e)}
+        ondblclick={() => resetWidth("notes")}
+        role="slider"
+        aria-orientation="vertical"
+        aria-label="Resize notes panel"
+        aria-valuenow={widthPx("notes")}
+        aria-valuemin={180}
+        tabindex="0"
+        title="Drag or use ← → · double-click to reset"
+      ></div>
+      <aside class="col notes" style="width: {columnWidths.notes}%" transition:slide={colSlide}>
+        <NotesPanel
+          {doc}
+          {annotations}
+          bind:editingAnnotationId
+          bind:noteDraft
+          onSave={saveNote}
+          onCancel={cancelNote}
+          onDelete={deleteAnnotation}
+          onJump={scrollToAnnotation}
+        />
+      </aside>
+    {/if}
+  </div>
 </main>
 
 <style>
-  :global(html, body) {
-    margin: 0;
-    padding: 0;
-    background: #0f1419;
-    color: #e6e6e6;
-    font-family:
-      -apple-system,
-      BlinkMacSystemFont,
-      "Segoe UI",
-      sans-serif;
-    height: 100%;
-  }
-  main {
-    max-width: 880px;
-    margin: 0 auto;
-    padding: 3rem 2rem;
+  .app {
     display: flex;
     flex-direction: column;
-    gap: 1.5rem;
+    height: 100vh;
+    background: var(--bg);
+    color: var(--fg);
   }
-  header h1 {
-    margin: 0;
-    font-size: 2.2rem;
-    font-weight: 600;
-    color: #fafafa;
-    letter-spacing: -0.02em;
+  .app.dragging {
+    cursor: col-resize;
+    user-select: none;
   }
-  .tagline {
-    margin: 0.25rem 0 0;
-    color: #94a3b8;
-    font-size: 0.95rem;
-  }
-  .actions button {
-    background: #2563eb;
-    color: #fff;
-    border: 0;
-    padding: 0.75rem 1.5rem;
-    border-radius: 8px;
-    font-size: 0.95rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-  .actions button:hover:not(:disabled) {
-    background: #1d4ed8;
-  }
-  .actions button:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-  .error {
-    background: #7f1d1d;
-    border: 1px solid #b91c1c;
-    padding: 1rem;
-    border-radius: 8px;
-  }
-  .error pre {
-    margin: 0.5rem 0 0;
-    white-space: pre-wrap;
-    font-size: 0.85rem;
-    color: #fecaca;
-  }
-  .result {
-    background: #1a1f2e;
-    border: 1px solid #2d3748;
-    padding: 1.5rem;
-    border-radius: 12px;
-  }
-  .result h2 {
-    margin: 0 0 0.25rem;
-    font-size: 1.8rem;
-    color: #fafafa;
-  }
-  .author {
-    margin: 0 0 1.25rem;
-    color: #94a3b8;
-    font-style: italic;
-  }
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 0.75rem;
-    margin-bottom: 1.5rem;
-  }
-  .stat {
-    background: #0f172a;
-    padding: 0.75rem 1rem;
-    border-radius: 8px;
-    border: 1px solid #1e293b;
-  }
-  .stat .label {
-    display: block;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    color: #64748b;
-    letter-spacing: 0.05em;
-    margin-bottom: 0.25rem;
-  }
-  .stat .value {
-    display: block;
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: #e2e8f0;
-  }
-  .stat .value.mono {
-    font-family: ui-monospace, SFMono-Regular, monospace;
-    font-size: 0.85rem;
-  }
-  .toc {
-    list-style: none;
-    padding: 0.75rem 1rem;
-    margin: 0.5rem 0 1.5rem;
-    max-height: 320px;
-    overflow-y: auto;
-    background: #0f172a;
-    border-radius: 8px;
-  }
-  .toc li {
-    padding: 0.25rem 0;
+
+  /* ── Error banner ── */
+  .banner.error {
     display: flex;
-    gap: 0.5rem;
-    align-items: baseline;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--space-4);
+    background: var(--danger-soft);
+    border-bottom: 1px solid var(--danger);
+    padding: var(--space-3) var(--space-5);
+    color: var(--fg);
+    font-size: var(--text-sm);
   }
-  .toc li .lvl {
-    color: #475569;
-    font-size: 0.7rem;
-    font-family: ui-monospace, SFMono-Regular, monospace;
-    min-width: 24px;
+  .banner-text {
+    min-width: 0;
+    flex: 1;
   }
-  .toc li .title {
-    color: #cbd5e1;
-    font-size: 0.9rem;
+  .banner-text strong {
+    color: var(--danger);
+    font-weight: var(--weight-semibold);
   }
-  .toc li.more {
-    color: #64748b;
-    font-style: italic;
-    padding-top: 0.5rem;
+  .banner-text details {
+    margin-top: var(--space-1);
+    color: var(--fg-muted);
+    font-size: var(--text-xs);
   }
-  .empty {
-    text-align: center;
-    padding: 3rem 1rem;
-    color: #94a3b8;
+  .banner-text summary {
+    cursor: pointer;
   }
-  .hint {
-    color: #64748b;
-    font-size: 0.85rem;
-    margin-top: 1rem;
-    text-align: center;
+  .banner-text pre {
+    margin: var(--space-1) 0 0;
+    max-height: 6rem;
+    overflow: auto;
+    font-family: var(--font-mono);
+    white-space: pre-wrap;
   }
-  .hint code {
-    background: #1e293b;
-    padding: 0.1rem 0.4rem;
-    border-radius: 4px;
-    font-size: 0.8rem;
+  .banner-actions {
+    display: flex;
+    gap: var(--space-2);
+    flex-shrink: 0;
   }
-  h3 {
-    margin: 1.5rem 0 0.5rem;
-    font-size: 0.95rem;
-    color: #94a3b8;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    font-weight: 600;
+  .banner-btn {
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    color: var(--fg);
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-md);
+    font-size: var(--text-xs);
+    cursor: pointer;
+  }
+  .banner-btn:hover {
+    background: var(--bg-hover);
+  }
+
+  /* ── Three columns ── */
+  .three-col {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+  .col {
+    height: 100%;
+    overflow-y: auto;
+    background: var(--bg);
+    padding: var(--space-4);
+    min-width: 0;
+  }
+  .col.contents {
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border);
+  }
+  .col.notes {
+    background: var(--bg-panel);
+    border-left: 1px solid var(--border);
+  }
+  .reader {
+    background: var(--bg-reader);
+    padding: var(--space-6) var(--space-8);
+    display: flex;
+    flex-direction: column;
+  }
+  .reader[aria-busy="true"] {
+    opacity: 0.6;
+    pointer-events: none;
+  }
+
+  /* ── Resize handle: 8px hit area, 1px visible line that turns accent ── */
+  .resize-handle {
+    position: relative;
+    width: 8px;
+    margin: 0 -4px; /* overlap the neighbours so the panels keep their border */
+    z-index: 1;
+    cursor: col-resize;
+    flex-shrink: 0;
+    outline: none;
+  }
+  .resize-handle::after {
+    content: "";
+    position: absolute;
+    inset: 0 3px;
+    background: transparent;
+    transition: background var(--ease);
+  }
+  .resize-handle:hover::after,
+  .resize-handle.active::after,
+  .resize-handle:focus-visible::after {
+    background: var(--accent);
+  }
+
+  /* ── Chapter prev/next ── */
+  .chapter-nav {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--space-4);
+    margin-top: auto;
+    padding-top: var(--space-5);
+    border-top: 1px solid var(--border);
+    font-family: var(--font-ui);
+  }
+  .chapter-link {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 45%;
+    background: transparent;
+    border: 0;
+    padding: var(--space-2) 0;
+    text-align: left;
+    color: var(--fg);
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+  }
+  .chapter-link.next {
+    text-align: right;
+    align-items: flex-end;
+  }
+  .chapter-dir {
+    font-size: var(--text-xs);
+    color: var(--fg-muted);
+  }
+  .chapter-link.prev .chapter-dir::before {
+    content: "← ";
+  }
+  .chapter-link.next .chapter-dir::after {
+    content: " →";
+  }
+  .chapter-name {
+    font-size: var(--text-sm);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+  .chapter-link:hover .chapter-name {
+    color: var(--accent);
   }
 </style>
