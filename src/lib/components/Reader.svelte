@@ -6,6 +6,7 @@
     OpenDocumentResponse,
     PendingSelection,
   } from "$lib/types";
+  import { untrack } from "svelte";
   import SelectionToolbar from "./SelectionToolbar.svelte";
 
   let {
@@ -20,6 +21,7 @@
     onNote,
     onCancelSelection,
     onUpdateNote,
+    onDelete,
   }: {
     doc: OpenDocumentResponse | null;
     currentChapter: Chapter | null;
@@ -28,10 +30,12 @@
     status: "idle" | "opening" | "ready" | "error";
     pendingSelection: PendingSelection | null;
     highlightedAnnotationId: string | null;
-    onHighlight: () => void;
+    /** Tạo highlight từ pendingSelection, trả id annotation mới (undefined nếu không tạo). */
+    onHighlight: () => string | undefined;
     onNote: () => void;
     onCancelSelection: () => void;
     onUpdateNote: (id: string, note: string) => void;
+    onDelete: (id: string) => void;
   } = $props();
 
   /** Container `position: relative` — toolbar được neo vào đây nên cuộn theo nội dung. */
@@ -41,30 +45,41 @@
   function handleMouseUp(event: MouseEvent) {
     const target = event.target as HTMLElement | null;
     if (!target?.closest?.(".reader-content")) return;
+    pendingSelection = selectionFromDom();
+  }
 
+  /** Double-click vào từ → highlight ngay + mở ô ghi chú tại chỗ (không qua toolbar). */
+  function handleDblClick(event: MouseEvent) {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest(".hl")) return; // highlight có sẵn: click đã mở editor sửa
+    const sel = selectionFromDom();
+    if (!sel) return;
+    pendingSelection = sel;
+    const id = onHighlight();
+    pendingSelection = null;
+    window.getSelection()?.removeAllRanges();
+    if (id) openGloss(id, sel.rect.x, (sel.rect_bottom ?? sel.rect.y) + 6, true);
+  }
+
+  /** Đọc selection hiện tại của trình duyệt thành PendingSelection (null nếu không hợp lệ). */
+  function selectionFromDom(): PendingSelection | null {
     const sel = window.getSelection();
-    if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-      pendingSelection = null;
-      return;
-    }
+    if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
 
     const range = sel.getRangeAt(0);
-    if (sel.toString().trim().length === 0) {
-      pendingSelection = null;
-      return;
-    }
+    if (sel.toString().trim().length === 0) return null;
 
     const blockEl = (range.startContainer.parentElement?.closest(
       "[data-block-id]"
     ) || range.startContainer.parentElement) as HTMLElement | null;
-    if (!blockEl || !bodyEl) return;
+    if (!blockEl || !bodyEl) return null;
 
     const blockId = blockEl.dataset.blockId;
     const chapterId = blockEl.dataset.chapterId;
-    if (!blockId || !chapterId) return;
+    if (!blockId || !chapterId) return null;
 
     const block = currentBlocks.find((b) => b.id === blockId);
-    if (!block) return;
+    if (!block) return null;
 
     const startOffset = computeCharOffset(blockEl, range.startContainer, range.startOffset);
     let endOffset = blockEl.contains(range.endContainer)
@@ -74,15 +89,15 @@
     if (endOffset < 0) endOffset = block.text.length;
     endOffset = Math.min(endOffset, block.text.length);
 
-    if (startOffset < 0 || startOffset >= endOffset) return;
+    if (startOffset < 0 || startOffset >= endOffset) return null;
     // Text lấy từ block.text theo offset — khớp 1:1 với char_start/char_end, không đọc DOM.
     const text = block.text.slice(startOffset, endOffset);
-    if (text.trim().length === 0) return;
+    if (text.trim().length === 0) return null;
 
     // Toạ độ tương đối với .reader-body (absolute), không phải viewport.
     const rect = range.getBoundingClientRect();
     const body = bodyEl.getBoundingClientRect();
-    pendingSelection = {
+    return {
       block_id: blockId,
       chapter_id: chapterId,
       char_start: startOffset,
@@ -206,14 +221,21 @@
     return note.length > GLOSS_MAX ? note.slice(0, GLOSS_MAX) + "…" : note;
   }
 
-  let editing = $state<{ id: string; x: number; y: number } | null>(null);
+  /** fresh = highlight vừa tạo bằng double-click: huỷ/Enter với note rỗng thì xoá luôn. */
+  let editing = $state<{ id: string; x: number; y: number; fresh: boolean } | null>(null);
   let draft = $state("");
 
   // Đổi chương/sách → editor neo vào DOM cũ, đóng lại.
   $effect(() => {
     void currentChapter?.id;
-    editing = null;
+    untrack(closeGloss);
   });
+
+  function openGloss(id: string, x: number, y: number, fresh = false) {
+    draft = annotations.find((a) => a.id === id)?.note ?? "";
+    editing = { id, x, y, fresh };
+    highlightedAnnotationId = id;
+  }
 
   function handleHighlightClick(annotationId: string, el: HTMLElement) {
     if (!bodyEl) return;
@@ -221,18 +243,25 @@
     if (!window.getSelection()?.isCollapsed) return;
     const r = el.getBoundingClientRect();
     const body = bodyEl.getBoundingClientRect();
-    draft = annotations.find((a) => a.id === annotationId)?.note ?? "";
-    editing = { id: annotationId, x: r.left + r.width / 2 - body.left, y: r.bottom - body.top + 6 };
-    highlightedAnnotationId = annotationId;
+    openGloss(annotationId, r.left + r.width / 2 - body.left, r.bottom - body.top + 6);
   }
 
   function commitGloss() {
     if (!editing) return;
-    onUpdateNote(editing.id, draft.trim());
-    closeGloss();
+    const note = draft.trim();
+    if (note.length === 0 && editing.fresh) onDelete(editing.id);
+    else onUpdateNote(editing.id, note);
+    editing = null;
+    draft = "";
+    highlightedAnnotationId = null;
   }
 
+  /** Huỷ: highlight vừa tạo bằng dblclick mà chưa có note → xoá, không để rác. */
   function closeGloss() {
+    const e = editing;
+    if (e?.fresh && annotations.find((a) => a.id === e.id)?.note === "") {
+      onDelete(e.id);
+    }
     editing = null;
     draft = "";
     highlightedAnnotationId = null;
@@ -283,7 +312,7 @@
   <div class="reader-column">
   <h2 class="reader-title">{currentChapter.title}</h2>
   <div class="reader-body" bind:this={bodyEl}>
-    <div class="reader-content">
+    <div class="reader-content" ondblclick={handleDblClick} role="presentation">
       {#each currentBlocks as block (block.id)}
         {@const rendered = renderBlockText(block)}
         {@const segments = splitTextWithHighlights(rendered.text, rendered.highlights)}

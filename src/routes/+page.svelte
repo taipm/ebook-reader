@@ -188,8 +188,8 @@
   );
 
   // ── Add annotation ───────────────────────────────────────────────────
-  function addHighlight() {
-    if (!pendingSelection || !doc || !currentChapter) return;
+  function addHighlight(): string | undefined {
+    if (!pendingSelection || !doc || !currentChapter) return undefined;
     const ann: Annotation = {
       id: crypto.randomUUID(),
       document_id: doc.meta.id,
@@ -211,6 +211,7 @@
     annotations = [...annotations, ann];
     pendingSelection = null;
     window.getSelection()?.removeAllRanges();
+    return ann.id;
   }
 
   function addNoteFromSelection() {
@@ -490,6 +491,7 @@
         onNote={addNoteFromSelection}
         onCancelSelection={() => (pendingSelection = null)}
         onUpdateNote={updateNote}
+        onDelete={deleteAnnotation}
       />
     </section>
 
