@@ -1,6 +1,6 @@
 [package]
 name = "ebook-reader"
-version = "0.1.0"
+version = "0.0.1-alpha.1"
 description = "Personal knowledge workspace — ebook reader + annotation + notes"
 authors = ["Tai PM"]
 edition = "2021"
@@ -22,6 +22,8 @@ thiserror = "1"
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+epub = "2"
 
 [dev-dependencies]
 # Property-based testing for CanonicalLocation round-trip
