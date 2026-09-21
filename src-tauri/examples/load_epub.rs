@@ -1,5 +1,4 @@
 use ebook_reader_lib::adapter::adapter_for;
-use ebook_reader_lib::model::DocumentFormat;
 use std::path::Path;
 
 fn main() {

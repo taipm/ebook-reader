@@ -44,6 +44,7 @@
   let pendingSelection = $state<PendingSelection | null>(null);
   let noteDraft = $state("");
   let editingAnnotationId = $state<string | null>(null);
+  let draftIsNew = $state(false); // editor opened for a just-created note → Cancel discards it
   let highlightedAnnotationId = $state<string | null>(null);
 
   // Library state
@@ -99,19 +100,36 @@
     }
   }
 
+  // Request tokens: a stale response (open two books fast, mash `]`) must not
+  // overwrite the newer one.
+  let openSeq = 0;
+  let chapterSeq = 0;
+
+  function resetSession() {
+    pendingSelection = null;
+    editingAnnotationId = null;
+    noteDraft = "";
+    highlightedAnnotationId = null;
+    draftIsNew = false;
+  }
+
   async function openPath(path: string) {
+    const seq = ++openSeq;
     status = "opening";
     errorMsg = "";
     try {
       const result = await invoke<OpenDocumentResponse>("open_document", { path });
+      if (seq !== openSeq) return;
       doc = result;
       currentPath = path;
       failedPath = null;
       status = "ready";
       annotations = [];
+      resetSession();
       const first = result.chapters[0];
       if (first) await selectChapter(first);
     } catch (e) {
+      if (seq !== openSeq) return;
       failedPath = path;
       fail(`Couldn't open "${basename(path)}"`, e);
     }
@@ -125,14 +143,19 @@
 
   async function selectChapter(chapter: Chapter) {
     if (!doc) return;
+    const seq = ++chapterSeq;
+    const docId = doc.meta.id;
     pendingSelection = null;
+    highlightedAnnotationId = null;
     try {
       const blocks = await invoke<Block[]>("get_chapter_blocks", {
         chapterId: chapter.id,
       });
+      if (seq !== chapterSeq || doc?.meta.id !== docId) return;
       currentChapter = chapter;
       currentBlocks = blocks;
     } catch (e) {
+      if (seq !== chapterSeq || doc?.meta.id !== docId) return;
       fail(`Couldn't load chapter "${chapter.title}"`, e);
     }
   }
@@ -213,6 +236,7 @@
     annotations = [...annotations, ann];
     if (columnWidths.notes === 0) setFocusMode("normal");
     editingAnnotationId = ann.id;
+    draftIsNew = true;
     noteDraft = "";
     pendingSelection = null;
   }
@@ -225,17 +249,16 @@
         : a
     );
     editingAnnotationId = null;
+    draftIsNew = false;
     noteDraft = "";
   }
 
   function cancelNote() {
-    if (editingAnnotationId) {
-      const ann = annotations.find((a) => a.id === editingAnnotationId);
-      if (ann && !ann.note.trim()) {
-        annotations = annotations.filter((a) => a.id !== editingAnnotationId);
-      }
+    if (editingAnnotationId && draftIsNew) {
+      annotations = annotations.filter((a) => a.id !== editingAnnotationId);
     }
     editingAnnotationId = null;
+    draftIsNew = false;
     noteDraft = "";
   }
 
@@ -250,15 +273,19 @@
     annotations = annotations.filter((a) => a.id !== id);
     if (editingAnnotationId === id) {
       editingAnnotationId = null;
+      draftIsNew = false;
       noteDraft = "";
     }
   }
+
+  let flashTimer: ReturnType<typeof setTimeout> | null = null;
 
   async function scrollToAnnotation(ann: Annotation) {
     if (currentChapter?.id !== ann.location.chapter_id) {
       const chap = doc?.chapters.find((c) => c.id === ann.location.chapter_id);
       if (!chap) return;
       await selectChapter(chap);
+      if (status === "error") return;
       await tick();
     }
     const el = document.querySelector(
@@ -266,8 +293,9 @@
     ) as HTMLElement | null;
     if (!el) return;
     el.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (flashTimer) clearTimeout(flashTimer);
     highlightedAnnotationId = ann.id;
-    setTimeout(() => (highlightedAnnotationId = null), 1500);
+    flashTimer = setTimeout(() => (highlightedAnnotationId = null), 1500);
   }
 
   // ── Focus modes ──────────────────────────────────────────────────────
@@ -293,6 +321,8 @@
   // ── Resize handle ────────────────────────────────────────────────────
   type Side = "contents" | "notes";
   let dragging = $state<Side | null>(null);
+  let innerWidth = $state(1280);
+  const panelMaxPx = $derived(Math.min(480, Math.floor(innerWidth * 0.4)));
 
   // Clamp in px so a narrow window can't squash a panel below --panel-w-min.
   function clampPct(px: number): number {
@@ -382,7 +412,7 @@
   }
 </script>
 
-<svelte:window onkeydown={onKeyDown} onclick={handleWindowClick} />
+<svelte:window onkeydown={onKeyDown} onclick={handleWindowClick} bind:innerWidth />
 
 <main class="app" data-mode={focusMode} class:dragging>
   <AppHeader
@@ -440,6 +470,8 @@
         aria-label="Resize contents panel"
         aria-valuenow={widthPx("contents")}
         aria-valuemin={180}
+        aria-valuemax={panelMaxPx}
+        aria-valuetext="{widthPx("contents")}px"
         tabindex="0"
         title="Drag or use ← → · double-click to reset"
       ></div>
@@ -459,22 +491,6 @@
         onCancelSelection={() => (pendingSelection = null)}
         onUpdateNote={updateNote}
       />
-      {#if doc && currentChapter && (prevChapter || nextChapter)}
-        <nav class="chapter-nav" aria-label="Chapter navigation">
-          {#if prevChapter}
-            <button class="chapter-link prev" onclick={() => selectChapter(prevChapter!)} title="[">
-              <span class="chapter-dir">Previous</span>
-              <span class="chapter-name">{prevChapter.title}</span>
-            </button>
-          {:else}<span></span>{/if}
-          {#if nextChapter}
-            <button class="chapter-link next" onclick={() => selectChapter(nextChapter!)} title="]">
-              <span class="chapter-dir">Next</span>
-              <span class="chapter-name">{nextChapter.title}</span>
-            </button>
-          {/if}
-        </nav>
-      {/if}
     </section>
 
     {#if columnWidths.notes > 0}
@@ -489,6 +505,8 @@
         aria-label="Resize notes panel"
         aria-valuenow={widthPx("notes")}
         aria-valuemin={180}
+        aria-valuemax={panelMaxPx}
+        aria-valuetext="{widthPx("notes")}px"
         tabindex="0"
         title="Drag or use ← → · double-click to reset"
       ></div>
@@ -627,53 +645,5 @@
   .resize-handle.active::after,
   .resize-handle:focus-visible::after {
     background: var(--accent);
-  }
-
-  /* ── Chapter prev/next ── */
-  .chapter-nav {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--space-4);
-    margin-top: auto;
-    padding-top: var(--space-5);
-    border-top: 1px solid var(--border);
-    font-family: var(--font-ui);
-  }
-  .chapter-link {
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    max-width: 45%;
-    background: transparent;
-    border: 0;
-    padding: var(--space-2) 0;
-    text-align: left;
-    color: var(--fg);
-    cursor: pointer;
-    border-radius: var(--radius-sm);
-  }
-  .chapter-link.next {
-    text-align: right;
-    align-items: flex-end;
-  }
-  .chapter-dir {
-    font-size: var(--text-xs);
-    color: var(--fg-muted);
-  }
-  .chapter-link.prev .chapter-dir::before {
-    content: "← ";
-  }
-  .chapter-link.next .chapter-dir::after {
-    content: " →";
-  }
-  .chapter-name {
-    font-size: var(--text-sm);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 100%;
-  }
-  .chapter-link:hover .chapter-name {
-    color: var(--accent);
   }
 </style>

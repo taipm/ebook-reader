@@ -6,16 +6,19 @@
 //!
 //! 1. `EpubDoc::new(path)` → mở file
 //! 2. `get_title()` → metadata.title
-//! 3. Walk `doc.toc` (NavPoint tree) → build `Chapter` list recursive
-//! 4. Với mỗi resource trong spine → `get_resource_str(idref)` → strip HTML → `Block`
+//! 3. Walk `doc.toc` (NavPoint tree) → build `Chapter` list recursive; navpoint
+//!    đầu tiên trỏ tới một resource là chủ sở hữu spine item đó
+//! 4. Duyệt spine theo thứ tự → strip HTML → `Block`; spine item không có trong
+//!    TOC gán vào chapter gần nhất phía trước (chưa có → "Front matter")
 //! 5. SHA256 toàn bộ file → `content_hash`
 //!
 //! ## Caveats
 //!
-//! - Chỉ strip HTML tags bằng parser đơn giản — KHÔNG xử lý entity phức tạp
-//!   hay embedded CSS/JS. Đủ cho MVP 1 (highlight text). PR sau sẽ dùng
+//! - Strip HTML bằng parser đơn giản: bỏ tag/comment/script/style, decode
+//!   entity thông dụng + numeric. Đủ cho MVP 1 (highlight text). PR sau sẽ dùng
 //!   `html5ever` nếu cần render phức tạp.
-//! - NavPoint thiếu thì fallback sang spine (flat).
+//! - TOC rỗng → mọi spine item vào một chapter "Chapter 1" (flat).
+//! - Nhiều navpoint cùng resource (khác #anchor) → chỉ navpoint đầu có nội dung.
 
 use crate::adapter::{DocumentAdapter, LoadedDocument};
 use crate::model::{
@@ -28,74 +31,81 @@ use std::fs;
 use std::io::BufReader;
 use std::path::Path;
 
-/// Strip HTML tags thô, giữ text. Skip script/style. Block tags → newline.
+/// Strip HTML tags thô, giữ text. Skip script/style/comment. Block tags → newline.
+/// Decode entity thông dụng + numeric. `<` chỉ là tag khi ký tự sau là [A-Za-z/!].
 fn strip_html(html: &str) -> String {
     let mut out = String::with_capacity(html.len());
-
-    // Find positions of <script>...</script> and <style>...</style> blocks to skip
     let lower = html.to_ascii_lowercase();
-    let mut skip_ranges: Vec<(usize, usize)> = Vec::new();
-    for tag in ["<script", "<style"] {
-        let end_tag = if tag == "<script" { "</script>" } else { "</style>" };
-        let mut start = 0;
-        while let Some(pos) = lower[start..].find(tag) {
-            let abs = start + pos;
-            if let Some(end_pos) = lower[abs..].find(end_tag) {
-                skip_ranges.push((abs, abs + end_pos + end_tag.len()));
-                start = abs + end_pos + end_tag.len();
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Iterate by char (UTF-8 safe)
     let mut i = 0;
     while i < html.len() {
-        // Skip ranges
-        let in_skip = skip_ranges.iter().any(|(s, e)| i >= *s && i < *e);
-        if in_skip {
-            // Advance to end of skip range
-            if let Some((_, e)) = skip_ranges.iter().find(|(s, e)| i >= *s && i < *e) {
-                i = *e;
-                continue;
-            }
-        }
-
-        // Find next char boundary
-        let ch = match html[i..].chars().next() {
+        let rest = &html[i..];
+        let ch = match rest.chars().next() {
             Some(c) => c,
             None => break,
         };
-        let ch_len = ch.len_utf8();
 
         if ch == '<' {
-            // Find end of tag
-            if let Some(te) = html[i..].find('>') {
-                let tag = &html[i + 1..i + te];
-                let tag_lower = tag.to_ascii_lowercase();
-                let first_word = tag_lower.split_whitespace().next().unwrap_or("");
-                if matches!(
-                    first_word,
-                    "br" | "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "tr"
-                ) {
-                    out.push('\n');
-                }
-                i += te + 1;
+            let next = rest[1..].chars().next();
+            let is_tag = matches!(next, Some(c) if c.is_ascii_alphabetic() || c == '/' || c == '!');
+            if !is_tag {
+                out.push('<');
+                i += 1;
                 continue;
-            } else {
+            }
+            if rest.starts_with("<!--") {
+                i = match rest.find("-->") {
+                    Some(e) => i + e + 3,
+                    None => html.len(),
+                };
+                continue;
+            }
+            if let Some((_, close)) = [("<script", "</script>"), ("<style", "</style>")]
+                .iter()
+                .find(|(open, _)| lower[i..].starts_with(open))
+            {
+                i = match lower[i..].find(close) {
+                    Some(e) => i + e + close.len(),
+                    None => html.len(),
+                };
+                continue;
+            }
+            let Some(te) = rest.find('>') else {
+                // unclosed tag: drop it, keep nothing after (malformed tail)
                 break;
+            };
+            let tag_lower = &lower[i + 1..i + te];
+            let first_word = tag_lower
+                .trim_start_matches('/')
+                .split(|c: char| c.is_whitespace() || c == '/')
+                .next()
+                .unwrap_or("");
+            if matches!(
+                first_word,
+                "br" | "p" | "div" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "li" | "tr"
+            ) {
+                out.push('\n');
+            }
+            i += te + 1;
+            continue;
+        }
+
+        if ch == '&' {
+            if let Some((decoded, len)) = decode_entity(rest) {
+                out.push(decoded);
+                i += len;
+                continue;
             }
         }
+
         out.push(ch);
-        i += ch_len;
+        i += ch.len_utf8();
     }
 
     // Collapse whitespace (preserve newlines)
     let mut result = String::with_capacity(out.len());
     let mut prev_space = false;
     let mut prev_newline = false;
-    for ch in result_collapsed(&out).chars() {
+    for ch in out.chars() {
         if ch == '\n' {
             if !prev_newline {
                 result.push('\n');
@@ -116,8 +126,27 @@ fn strip_html(html: &str) -> String {
     result.trim().to_string()
 }
 
-fn result_collapsed(s: &str) -> String {
-    s.to_string()
+/// Decode 1 entity ở đầu `s` (bắt đầu bằng '&'). Trả (char, số byte đã ăn).
+fn decode_entity(s: &str) -> Option<(char, usize)> {
+    let semi = s[..s.len().min(12)].find(';')?;
+    let body = &s[1..semi];
+    let ch = match body {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => ' ',
+        _ => {
+            let code = body.strip_prefix('#')?;
+            let n = match code.strip_prefix(['x', 'X']) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => code.parse::<u32>().ok()?,
+            };
+            char::from_u32(n)?
+        }
+    };
+    Some((ch, semi + 1))
 }
 
 fn sha256_hex(data: &[u8]) -> String {
@@ -146,47 +175,69 @@ impl DocumentAdapter for EpubAdapter {
         let title = doc.get_title().unwrap_or_else(|| "Untitled".to_string());
         let content_hash = self.content_hash(path)?;
 
+        // 1. TOC → chapters (giữ cây), mỗi navpoint resolve về spine index.
         let mut chapters: Vec<Chapter> = Vec::new();
+        let mut spine_owner: HashMap<usize, ChapterId> = HashMap::new();
+        let toc_snapshot = doc.toc.clone();
+        walk_navpoints(&mut doc, &toc_snapshot, None, 1, &mut chapters, &mut spine_owner);
+
+        // 2. Spine theo thứ tự → blocks. Spine item không có trong TOC gán vào
+        //    chapter gần nhất phía trước; chưa có chapter nào → "Front matter".
+        //    TOC rỗng → mỗi spine item một chapter "Chapter N" (flat).
+        //    Navpoint trùng resource (khác #anchor) → chapter rỗng (không cắt anchor).
         let mut blocks: Vec<Block> = Vec::new();
         let mut block_index: HashMap<ChapterId, u32> = HashMap::new();
-
-        let toc_snapshot = doc.toc.clone();
-        walk_navpoints(
-            &mut doc,
-            &toc_snapshot,
-            None,
-            1,
-            &mut chapters,
-            &mut blocks,
-            &mut block_index,
-        );
-
-        // Fallback: nếu toc rỗng, build flat từ spine
-        if chapters.is_empty() {
-            let n = doc.get_num_chapters();
-            for i in 0..n {
-                doc.set_current_chapter(i);
-                if let Some((content, _mime)) = doc.get_current_str() {
-                    let text = strip_html(&content);
-                    if text.is_empty() {
-                        continue;
-                    }
-                    let chapter_id = ChapterId::new();
-                    chapters.push(Chapter {
-                        id: chapter_id,
-                        parent_id: None,
-                        title: format!("Chapter {}", i + 1),
-                        level: 1,
-                        position: chapters.len() as u32,
-                    });
-                    blocks.push(Block {
-                        id: BlockId::new(),
-                        chapter_id,
-                        text,
-                        index_in_chapter: 0,
-                    });
-                }
+        let mut current: Option<ChapterId> = None;
+        for i in 0..doc.get_num_chapters() {
+            if let Some(owner) = spine_owner.get(&i) {
+                current = Some(*owner);
             }
+            if !doc.set_current_chapter(i) {
+                continue;
+            }
+            let Some((content, _mime)) = doc.get_current_str() else {
+                continue;
+            };
+            let text = strip_html(&content);
+            if text.is_empty() {
+                continue;
+            }
+            let chapter_id = match current {
+                Some(id) if !toc_snapshot.is_empty() => id,
+                _ => {
+                    let id = ChapterId::new();
+                    let title = if toc_snapshot.is_empty() {
+                        format!("Chapter {}", chapters.len() + 1)
+                    } else {
+                        "Front matter".to_string()
+                    };
+                    chapters.push(Chapter {
+                        id,
+                        parent_id: None,
+                        title,
+                        level: 1,
+                        position: 0,
+                    });
+                    current = Some(id);
+                    id
+                }
+            };
+            let idx = block_index.entry(chapter_id).or_insert(0);
+            blocks.push(Block {
+                id: BlockId::new(),
+                chapter_id,
+                text,
+                index_in_chapter: *idx,
+            });
+            *idx += 1;
+        }
+        // "Front matter" được push sau TOC nhưng phải đứng đầu
+        if let Some(fm) = chapters.iter().position(|c| c.title == "Front matter" && c.parent_id.is_none()) {
+            let ch = chapters.remove(fm);
+            chapters.insert(0, ch);
+        }
+        for (pos, ch) in chapters.iter_mut().enumerate() {
+            ch.position = pos as u32;
         }
 
         if chapters.is_empty() {
@@ -226,22 +277,18 @@ fn walk_navpoints(
     parent_id: Option<ChapterId>,
     level: u8,
     chapters: &mut Vec<Chapter>,
-    blocks: &mut Vec<Block>,
-    block_index: &mut HashMap<ChapterId, u32>,
+    spine_owner: &mut HashMap<usize, ChapterId>,
 ) {
     for nav in navs {
         let chapter_id = ChapterId::new();
-        let position = chapters.len() as u32;
-
         chapters.push(Chapter {
             id: chapter_id,
             parent_id,
             title: nav.label.clone(),
             level,
-            position,
+            position: chapters.len() as u32,
         });
 
-        // Resolve content path → spine index
         // Strip fragment (#...) vì NavPoint content thường có "#anchor"
         let content_path = nav
             .content
@@ -250,21 +297,8 @@ fn walk_navpoints(
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| nav.content.clone());
         if let Some(ch_idx) = doc.resource_uri_to_chapter(&content_path) {
-            if doc.set_current_chapter(ch_idx) {
-                if let Some((content, _mime)) = doc.get_current_str() {
-                    let text = strip_html(&content);
-                    if !text.is_empty() {
-                        let idx = block_index.entry(chapter_id).or_insert(0);
-                        blocks.push(Block {
-                            id: BlockId::new(),
-                            chapter_id,
-                            text,
-                            index_in_chapter: *idx,
-                        });
-                        *idx += 1;
-                    }
-                }
-            }
+            // navpoint đầu tiên trỏ tới resource là chủ sở hữu
+            spine_owner.entry(ch_idx).or_insert(chapter_id);
         }
 
         if !nav.children.is_empty() {
@@ -274,8 +308,7 @@ fn walk_navpoints(
                 Some(chapter_id),
                 level.saturating_add(1),
                 chapters,
-                blocks,
-                block_index,
+                spine_owner,
             );
         }
     }
@@ -308,6 +341,23 @@ mod tests {
         let html = "<p>broken<span>no end";
         let out = strip_html(html);
         assert!(out.contains("broken"));
+    }
+
+    #[test]
+    fn strip_html_decodes_entities() {
+        assert_eq!(strip_html("GROSSET &amp; DUNLAP"), "GROSSET & DUNLAP");
+        assert_eq!(strip_html("a&lt;b&gt;c &quot;q&quot; &apos;s&apos;"), "a<b>c \"q\" 's'");
+        assert_eq!(strip_html("x&nbsp;y"), "x y");
+        assert_eq!(strip_html("it&#8217;s &#x41;"), "it’s A");
+        // unknown / malformed stay literal
+        assert_eq!(strip_html("&bogus; & &#zz;"), "&bogus; & &#zz;");
+    }
+
+    #[test]
+    fn strip_html_literal_lt_and_comments() {
+        assert_eq!(strip_html("<p>1 < 2 and 3 > 1</p>"), "1 < 2 and 3 > 1");
+        assert_eq!(strip_html("<!-- a > b --><p>kept</p>"), "kept");
+        assert_eq!(strip_html("<p>tail 1 < 2"), "tail 1 < 2");
     }
 
     #[test]

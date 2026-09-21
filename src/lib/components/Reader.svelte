@@ -49,8 +49,7 @@
     }
 
     const range = sel.getRangeAt(0);
-    const text = sel.toString().trim();
-    if (text.length === 0) {
+    if (sel.toString().trim().length === 0) {
       pendingSelection = null;
       return;
     }
@@ -64,12 +63,21 @@
     const chapterId = blockEl.dataset.chapterId;
     if (!blockId || !chapterId) return;
 
+    const block = currentBlocks.find((b) => b.id === blockId);
+    if (!block) return;
+
     const startOffset = computeCharOffset(blockEl, range.startContainer, range.startOffset);
-    let endOffset = computeCharOffset(blockEl, range.endContainer, range.endOffset);
+    let endOffset = blockEl.contains(range.endContainer)
+      ? computeCharOffset(blockEl, range.endContainer, range.endOffset)
+      : -1;
     // Chọn vắt qua đoạn khác → cắt tại cuối đoạn đầu thay vì nuốt im lặng.
-    if (endOffset < 0) endOffset = (blockEl.textContent || "").length;
+    if (endOffset < 0) endOffset = block.text.length;
+    endOffset = Math.min(endOffset, block.text.length);
 
     if (startOffset < 0 || startOffset >= endOffset) return;
+    // Text lấy từ block.text theo offset — khớp 1:1 với char_start/char_end, không đọc DOM.
+    const text = block.text.slice(startOffset, endOffset);
+    if (text.trim().length === 0) return;
 
     // Toạ độ tương đối với .reader-body (absolute), không phải viewport.
     const rect = range.getBoundingClientRect();
@@ -90,12 +98,33 @@
     node: Node,
     offsetInNode: number
   ): number {
+    // Triple-click: boundary là Element + chỉ số con → quy về text node/ranh giới ký tự.
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const child = node.childNodes[offsetInNode];
+      if (!child) return (node.textContent || "").length + elementStart(blockEl, node);
+      node = child;
+      offsetInNode = 0;
+      if (node.nodeType === Node.ELEMENT_NODE) return elementStart(blockEl, node);
+    }
     const walker = document.createTreeWalker(blockEl, NodeFilter.SHOW_TEXT);
     let charCount = 0;
     while (walker.nextNode()) {
       const cur = walker.currentNode;
       if (cur === node) return charCount + offsetInNode;
       charCount += (cur.textContent || "").length;
+    }
+    return -1;
+  }
+
+  /** Số ký tự trước `el` trong block (el là Element nằm trong blockEl, hoặc chính blockEl → 0). */
+  function elementStart(blockEl: HTMLElement, el: Node): number {
+    if (el === blockEl) return 0;
+    const walker = document.createTreeWalker(blockEl, NodeFilter.SHOW_TEXT);
+    let count = 0;
+    while (walker.nextNode()) {
+      const cur = walker.currentNode;
+      if (el.contains(cur)) return count;
+      count += (cur.textContent || "").length;
     }
     return -1;
   }
@@ -150,12 +179,15 @@
     const out: Segment[] = [];
     let pos = 0;
     for (const hl of highlights) {
-      if (hl.start > pos) {
-        out.push({ kind: "text", content: text.slice(pos, hl.start) });
+      // Highlight chồng nhau: bắt đầu từ chỗ chưa render, bỏ phần đã bị phủ.
+      const s = Math.max(hl.start, pos);
+      if (hl.end <= s) continue;
+      if (s > pos) {
+        out.push({ kind: "text", content: text.slice(pos, s) });
       }
       out.push({
         kind: "hl",
-        content: text.slice(hl.start, hl.end),
+        content: text.slice(s, hl.end),
         note: hl.note,
         id: hl.id,
         color: hl.color,
@@ -176,6 +208,12 @@
 
   let editing = $state<{ id: string; x: number; y: number } | null>(null);
   let draft = $state("");
+
+  // Đổi chương/sách → editor neo vào DOM cũ, đóng lại.
+  $effect(() => {
+    void currentChapter?.id;
+    editing = null;
+  });
 
   function handleHighlightClick(annotationId: string, el: HTMLElement) {
     if (!bodyEl) return;
@@ -278,7 +316,8 @@
       <div class="gloss-editor" style="left: {editing.x}px; top: {editing.y}px">
         <input
           type="text"
-          placeholder="Nghĩa / ghi chú…"
+          placeholder="Add a note…"
+          aria-label="Note for highlight"
           bind:value={draft}
           onkeydown={onGlossKey}
           use:autofocus
@@ -373,53 +412,24 @@
     background: transparent;
     border: 0;
     padding: var(--space-1) var(--space-2);
-    outline: none;
+    outline: none; /* ring vẽ trên wrapper qua :focus-within */
+  }
+  .gloss-editor:focus-within {
+    box-shadow: var(--shadow-md), 0 0 0 2px var(--accent-ring);
   }
   .hl.flash {
-    outline: 2px solid var(--accent);
-    outline-offset: 2px;
+    box-shadow: 0 0 0 2px var(--accent-ring);
   }
   @media (prefers-reduced-motion: no-preference) {
     .hl {
       transition: box-shadow var(--ease);
     }
-    /* Gloss qua ::after: không sinh text node → computeCharOffset/selection không bị lệch */
-  .hl.note-hl::after {
-    content: " ⟨" attr(data-note) "⟩";
-    font-family: var(--font-ui);
-    font-size: var(--text-xs);
-    color: var(--fg-muted);
-    background: var(--bg-reader);
-    padding-inline: 0.15em;
-  }
-  .gloss-editor {
-    position: absolute;
-    transform: translateX(-50%);
-    z-index: 100;
-    padding: var(--space-1);
-    background: var(--bg-raised);
-    border: 1px solid var(--border);
-    border-radius: var(--radius-md);
-    box-shadow: var(--shadow-md);
-  }
-  .gloss-editor input {
-    width: 16rem;
-    max-width: 70vw;
-    font: inherit;
-    font-family: var(--font-ui);
-    font-size: var(--text-sm);
-    color: var(--fg);
-    background: transparent;
-    border: 0;
-    padding: var(--space-1) var(--space-2);
-    outline: none;
-  }
-  .hl.flash {
+    .hl.flash {
       animation: pulse 0.6s 2;
     }
     @keyframes pulse {
       50% {
-        outline-color: transparent;
+        box-shadow: 0 0 0 2px transparent;
       }
     }
   }

@@ -60,9 +60,9 @@
       <span>Bundled books</span>
       <button class="library-action" role="menuitem" onclick={onOpenExternal}>Open a file…</button>
     </div>
-    <ul class="library-list">
+    <ul class="library-list" role="none">
       {#each library as book (book.id)}
-        <li>
+        <li role="none">
           <button
             class="library-item"
             role="menuitem"
@@ -184,7 +184,7 @@
   .library-size {
     font-family: var(--font-mono);
     font-size: var(--text-xs);
-    color: var(--fg-faint);
+    color: var(--fg-muted);
     flex-shrink: 0;
   }
   .library-empty {

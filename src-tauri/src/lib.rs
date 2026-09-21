@@ -47,7 +47,7 @@ fn open_document(
         .map_err(|e| format!("Failed to load document: {e}"))?;
 
     let block_count = loaded.blocks.len();
-    let total_chars: usize = loaded.blocks.iter().map(|b| b.text.len()).sum();
+    let total_chars: usize = loaded.blocks.iter().map(|b| b.text.chars().count()).sum();
 
     let response = OpenDocumentResponse {
         meta: loaded.meta.clone(),
@@ -56,7 +56,7 @@ fn open_document(
         total_chars,
     };
 
-    *state.current.lock().unwrap() = Some(loaded);
+    *state.current.lock().unwrap_or_else(|e| e.into_inner()) = Some(loaded);
 
     Ok(response)
 }
@@ -66,7 +66,7 @@ fn get_chapter_blocks(
     chapter_id: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<Block>, String> {
-    let guard = state.current.lock().unwrap();
+    let guard = state.current.lock().unwrap_or_else(|e| e.into_inner());
     let doc = guard
         .as_ref()
         .ok_or_else(|| "No document loaded".to_string())?;
@@ -110,6 +110,14 @@ pub fn list_books_in_dir(dir: &std::path::Path) -> Result<Vec<BundledBook>, Stri
         let Some(format) = detect_format(&path) else {
             continue;
         };
+        // README.md trong thư mục sách là mô tả thư mục, không phải sách
+        if path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("readme"))
+        {
+            continue;
+        }
         let metadata = entry.metadata().ok();
         let size_bytes = metadata.map(|m| m.len()).unwrap_or(0);
         let id = entry.file_name().to_string_lossy().to_string();
@@ -155,25 +163,33 @@ pub fn list_books_in_dir(dir: &std::path::Path) -> Result<Vec<BundledBook>, Stri
     Ok(books)
 }
 
-/// Resolve path tới bundled-books directory (cho cả dev và prod).
+/// Dev-only: `bundled-books/` cạnh repo. CARGO_MANIFEST_DIR được nướng lúc
+/// compile nên chỉ đúng trên máy build → không dùng cho bản đóng gói.
 pub fn bundled_books_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../bundled-books")
 }
 
-/// List tất cả file trong `bundled-books/` (dev) hoặc Tauri resource dir (prod).
+/// List sách trong Tauri resource dir (`bundle.resources` → `bundled-books/`);
+/// build debug fallback về thư mục repo.
 #[tauri::command]
 fn list_bundled_books(app: tauri::AppHandle) -> Result<Vec<BundledBook>, String> {
     use tauri::Manager;
 
-    let dir = if let Ok(resource_dir) = app.path().resource_dir() {
-        let candidate = resource_dir.join("bundled-books");
-        if candidate.exists() {
-            candidate
-        } else {
-            bundled_books_dir()
+    let resource = app
+        .path()
+        .resource_dir()
+        .map(|d| d.join("bundled-books"))
+        .ok()
+        .filter(|d| d.exists());
+    let dir = match resource {
+        Some(d) => d,
+        None if cfg!(debug_assertions) => bundled_books_dir(),
+        None => {
+            return Err(
+                "bundled-books resource missing: add \"../bundled-books/*\" to bundle.resources in tauri.conf.json"
+                    .to_string(),
+            )
         }
-    } else {
-        bundled_books_dir()
     };
 
     list_books_in_dir(&dir)

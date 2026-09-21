@@ -207,7 +207,7 @@
     font-size: var(--text-xs);
   }
   .count {
-    color: var(--fg-faint);
+    color: var(--fg-muted);
     font-size: var(--text-xs);
     font-variant-numeric: tabular-nums;
   }
@@ -269,16 +269,16 @@
     padding: var(--space-3);
     background: var(--note-bg);
     border: 1px solid var(--note-border);
-    border-left: 3px solid var(--hl-yellow);
+    border-left: 3px solid var(--hl-yellow-fg);
     border-radius: var(--radius-md);
     transition: border-color var(--ease);
   }
   .card + .card {
     margin-top: var(--space-2);
   }
-  .card[data-marker="rose"] { border-left-color: var(--hl-rose); }
-  .card[data-marker="green"] { border-left-color: var(--hl-green); }
-  .card[data-marker="blue"] { border-left-color: var(--hl-blue); }
+  .card[data-marker="rose"] { border-left-color: var(--hl-rose-fg); }
+  .card[data-marker="green"] { border-left-color: var(--hl-green-fg); }
+  .card[data-marker="blue"] { border-left-color: var(--hl-blue-fg); }
   .card.editor {
     border-color: var(--border-strong);
   }
@@ -299,7 +299,7 @@
     border: 0;
     border-radius: var(--radius-sm);
     background: transparent;
-    color: var(--fg-faint);
+    color: var(--fg-muted);
     font-size: var(--text-md);
     line-height: 1;
     cursor: pointer;
@@ -350,7 +350,7 @@
   }
   .hint {
     margin-left: auto;
-    color: var(--fg-faint);
+    color: var(--fg-muted);
     font-size: var(--text-xs);
   }
   .link {
@@ -376,8 +376,7 @@
     background: var(--bg-raised);
     resize: vertical;
   }
-  .input:focus {
-    outline: none;
+  .input:focus-visible {
     border-color: var(--accent);
   }
   .btn {

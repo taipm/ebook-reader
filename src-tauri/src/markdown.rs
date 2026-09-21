@@ -56,6 +56,7 @@ impl DocumentAdapter for MarkdownAdapter {
         let raw = fs::read_to_string(path)
             .with_context(|| format!("Failed to read Markdown file: {}", path.display()))?;
         let content_hash = sha256_hex(raw.as_bytes());
+        let raw = raw.replace("\r\n", "\n");
 
         let (fm_title, fm_author, body) = parse_frontmatter(&raw);
 
@@ -102,8 +103,19 @@ impl DocumentAdapter for MarkdownAdapter {
             buf.clear();
         };
 
+        let mut in_fence = false;
         for line in body.lines() {
-            if let Some(heading) = parse_heading(line) {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                if !current_buffer.is_empty() {
+                    current_buffer.push('\n');
+                }
+                current_buffer.push_str(line);
+            } else if in_fence {
+                // code block giữ nguyên 1 block, kể cả dòng trống / dòng bắt đầu bằng #
+                current_buffer.push('\n');
+                current_buffer.push_str(line);
+            } else if let Some(heading) = parse_heading(line) {
                 // Flush buffer của chapter cũ
                 flush_buffer(
                     &mut current_buffer,
@@ -162,6 +174,9 @@ impl DocumentAdapter for MarkdownAdapter {
                 if first_chap_with_blocks > 0 {
                     // Chapter 0 thực sự rỗng → có thể xóa
                     chapters.remove(0);
+                    for (pos, ch) in chapters.iter_mut().enumerate() {
+                        ch.position = pos as u32;
+                    }
                 }
             }
         }
@@ -205,7 +220,12 @@ fn parse_heading(line: &str) -> Option<Heading> {
     if level == 0 || level > 6 {
         return None;
     }
-    let rest = trimmed[level..].trim_start();
+    // CommonMark: sau dãy `#` phải có whitespace (`#hashtag` không phải heading)
+    let after = &trimmed[level..];
+    if !after.starts_with(|c: char| c.is_whitespace()) {
+        return None;
+    }
+    let rest = after.trim();
     if rest.is_empty() {
         return None;
     }
@@ -226,6 +246,35 @@ mod tests {
         let mut f = fs::File::create(&path).unwrap();
         f.write_all(content.as_bytes()).unwrap();
         path
+    }
+
+    #[test]
+    fn parse_heading_requires_space_after_hashes() {
+        assert!(parse_heading("#hashtag").is_none());
+        assert!(parse_heading("#!/bin/bash").is_none());
+        assert_eq!(parse_heading("##  Spaced ").unwrap().title, "Spaced");
+    }
+
+    #[test]
+    fn fenced_code_is_one_block_and_not_a_heading() {
+        let md = "# Intro\n\ntext\n\n```sh\n# not a heading\n\necho hi\n```\n\n# Real\n\nmore\n";
+        let path = write_tmp(md, "ebook_reader_fence_test.md");
+        let doc = MarkdownAdapter.load(&path).unwrap();
+        let titles: Vec<&str> = doc.chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, vec!["Intro", "Real"]);
+        let code = doc.blocks.iter().find(|b| b.text.starts_with("```sh")).unwrap();
+        assert!(code.text.contains("# not a heading\n\necho hi\n```"));
+        assert_eq!(doc.chapters.iter().map(|c| c.position).collect::<Vec<_>>(), vec![0, 1]);
+    }
+
+    #[test]
+    fn crlf_frontmatter_is_parsed() {
+        let md = "---\r\ntitle: T\r\nauthor: A\r\n---\r\n# H\r\n\r\nbody\r\n";
+        let path = write_tmp(md, "ebook_reader_crlf_test.md");
+        let doc = MarkdownAdapter.load(&path).unwrap();
+        assert_eq!(doc.meta.title, "T");
+        assert_eq!(doc.meta.author.as_deref(), Some("A"));
+        assert!(!doc.blocks.iter().any(|b| b.text.contains("title:")));
     }
 
     #[test]

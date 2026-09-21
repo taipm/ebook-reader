@@ -50,12 +50,12 @@
       </li>
     {/each}
   </ol>
-  <nav class="chapter-nav" aria-label="Chapter">
-    <button class="nav-btn" disabled={!prev} title={prev?.title} onclick={() => prev && onSelect(prev)}>
+  <nav class="chapter-nav" aria-label="Chapter navigation">
+    <button class="nav-btn" disabled={!prev} aria-label="Previous chapter" title={prev?.title} onclick={() => prev && onSelect(prev)}>
       ← Previous
     </button>
     <span class="nav-pos">{currentIndex >= 0 ? currentIndex + 1 : "–"} / {chapters.length}</span>
-    <button class="nav-btn" disabled={!next} title={next?.title} onclick={() => next && onSelect(next)}>
+    <button class="nav-btn" disabled={!next} aria-label="Next chapter" title={next?.title} onclick={() => next && onSelect(next)}>
       Next →
     </button>
   </nav>

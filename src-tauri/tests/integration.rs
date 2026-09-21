@@ -50,11 +50,14 @@ fn end_to_end_load_dracula_via_adapter() {
     assert_eq!(doc.meta.format, DocumentFormat::Epub);
 
     // Chapters + blocks
+    // 32 từ NavPoint tree + 1 "Front matter" cho 2 spine item (cover, title)
+    // đứng trước navpoint đầu tiên
     assert_eq!(
         doc.chapters.len(),
-        32,
-        "Dracula has 32 chapters from NavPoint tree"
+        33,
+        "Dracula has 32 NavPoint chapters + Front matter"
     );
+    assert_eq!(doc.chapters[0].title, "Front matter");
     assert!(
         doc.blocks.len() >= 30,
         "Dracula should have ≥ 30 blocks (got {})",
@@ -103,6 +106,33 @@ fn end_to_end_load_calculus_via_adapter() {
         doc.blocks.len(),
         total_chars
     );
+}
+
+/// Spine item không có trong TOC vẫn phải vào blocks (calculus: 9/42 spine
+/// item ngoài TOC), và navpoint trùng resource không được nhân bản text.
+#[test]
+fn epub_keeps_spine_items_outside_toc_without_duplicates() {
+    use std::collections::HashSet;
+    for (name, min_blocks) in [("calculus.epub", 42usize), ("dracula.epub", 32)] {
+        let path = bundled_books().join(name);
+        let doc = EpubAdapter.load(&path).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert!(
+            doc.blocks.len() >= min_blocks,
+            "{name}: expected >= {min_blocks} blocks (one per non-empty spine item), got {}",
+            doc.blocks.len()
+        );
+        let unique: HashSet<&str> = doc.blocks.iter().map(|b| b.text.as_str()).collect();
+        assert_eq!(unique.len(), doc.blocks.len(), "{name}: duplicated block text");
+        // mọi block phải thuộc một chapter có thật, positions liên tục
+        let ids: HashSet<_> = doc.chapters.iter().map(|c| c.id).collect();
+        assert!(doc.blocks.iter().all(|b| ids.contains(&b.chapter_id)), "{name}: orphan block");
+        let positions: Vec<u32> = doc.chapters.iter().map(|c| c.position).collect();
+        assert_eq!(positions, (0..doc.chapters.len() as u32).collect::<Vec<_>>(), "{name}: positions");
+        assert!(
+            !doc.blocks.iter().any(|b| b.text.contains("&amp;") || b.text.contains("&nbsp;")),
+            "{name}: undecoded entity"
+        );
+    }
 }
 
 #[test]
@@ -209,7 +239,7 @@ fn list_bundled_books_finds_two_ebooks() {
     for b in &books {
         assert_eq!(b.format, "epub", "Both are EPUB");
         assert!(b.size_bytes > 0, "Size > 0");
-        assert!(b.title.len() > 0, "Title parsed");
+        assert!(!b.title.is_empty(), "Title parsed");
     }
 
     // Sort theo title

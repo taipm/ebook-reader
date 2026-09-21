@@ -175,7 +175,7 @@
   .focus-btn {
     background: transparent;
     color: var(--fg-muted);
-    border: 0;
+    border: 1px solid transparent;
     padding: var(--space-1) var(--space-3);
     border-radius: calc(var(--radius-md) - 2px);
     transition: background var(--ease), color var(--ease);
@@ -185,6 +185,7 @@
   }
   .focus-btn.active {
     background: var(--bg-raised);
+    border-color: var(--border);
     color: var(--accent);
     font-weight: var(--weight-medium);
     box-shadow: var(--shadow-sm);
